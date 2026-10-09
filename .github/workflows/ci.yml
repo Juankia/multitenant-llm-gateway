@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Lint, typecheck, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test -- --ci
+      - name: E2E tests (fake providers, in-memory persistence)
+        run: npm run test:e2e -- --ci
+      - name: Build
+        run: npm run build
+
+  rls:
+    name: Postgres migrations + RLS checks
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: ci_password
+          POSTGRES_DB: llm_gateway
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      POSTGRES_USER: postgres
+      POSTGRES_DB: llm_gateway
+      APP_DB_PASSWORD: ci_app_password
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply migrations (as owner)
+        env:
+          PGPASSWORD: ci_password
+        run: |
+          bash db/migrations/000_roles.sh
+          psql -U postgres -d llm_gateway -v ON_ERROR_STOP=1 -f db/migrations/001_schema.sql -f db/migrations/002_rls.sql
+      - name: Run RLS assertions (as runtime role)
+        env:
+          PGPASSWORD: ci_app_password
+        run: psql -U gateway_app -d llm_gateway -v ON_ERROR_STOP=1 -f db/tests/rls_check.sql
